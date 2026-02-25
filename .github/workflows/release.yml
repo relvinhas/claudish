@@ -252,6 +252,36 @@ jobs:
       - name: Publish to npm
         run: cd packages/cli && npm publish --access public --provenance
 
+  deploy-landing-page:
+    needs: release
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install pnpm
+        run: npm install -g pnpm
+
+      - name: Install dependencies
+        run: cd landingpage && pnpm install --frozen-lockfile
+
+      - name: Build landing page
+        run: cd landingpage && pnpm build
+
+      - name: Deploy to Firebase Hosting
+        uses: FirebaseExtended/action-hosting-deploy@v0
+        with:
+          repoToken: ${{ secrets.GITHUB_TOKEN }}
+          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          channelId: live
+          projectId: claudish
+          entryPoint: landingpage
+
   update-homebrew:
     needs: release
     runs-on: ubuntu-latest

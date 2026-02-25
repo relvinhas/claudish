@@ -3,6 +3,7 @@ import HeroSection from "./components/HeroSection";
 import SubscriptionSection from "./components/SubscriptionSection";
 import FeatureSection from "./components/FeatureSection";
 import SupportSection from "./components/SupportSection";
+import Changelog from "./components/Changelog";
 
 const App: React.FC = () => {
   return (
@@ -18,6 +19,12 @@ const App: React.FC = () => {
               className="hover:text-white transition-colors"
             >
               Documentation
+            </a>
+            <a
+              href="#changelog"
+              className="hover:text-white transition-colors"
+            >
+              Changelog
             </a>
             <a
               href="https://github.com/MadAppGang/claudish"
@@ -36,6 +43,7 @@ const App: React.FC = () => {
         <SubscriptionSection />
         <FeatureSection />
         <SupportSection />
+        <Changelog />
       </main>
 
       {/* Footer / About Section */}
@@ -105,6 +113,12 @@ const App: React.FC = () => {
                 className="hover:text-claude-ish transition-colors"
               >
                 GitHub
+              </a>
+              <a
+                href="#changelog"
+                className="hover:text-claude-ish transition-colors"
+              >
+                Changelog
               </a>
               <a
                 href="https://openrouter.ai/"
