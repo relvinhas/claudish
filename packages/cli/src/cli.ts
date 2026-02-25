@@ -1,6 +1,6 @@
 import { ENV } from "./config.js";
 import type { ClaudishConfig } from "./types.js";
-import { loadModelInfo, getAvailableModels } from "./model-loader.js";
+import { loadModelInfo, getAvailableModels, fetchLiteLLMModels } from "./model-loader.js";
 import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync, readdirSync, unlinkSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -539,6 +539,23 @@ async function searchAndPrintModels(query: string, forceUpdate: boolean): Promis
     }
   }
 
+  // Fetch LiteLLM models if configured
+  if (process.env.LITELLM_BASE_URL && process.env.LITELLM_API_KEY) {
+    try {
+      const litellmModels = await fetchLiteLLMModels(
+        process.env.LITELLM_BASE_URL,
+        process.env.LITELLM_API_KEY,
+        forceUpdate
+      );
+      if (litellmModels.length > 0) {
+        console.error(`🔗 Found ${litellmModels.length} LiteLLM models`);
+        models = [...litellmModels, ...models];
+      }
+    } catch {
+      // Ignore fetch errors
+    }
+  }
+
   // Perform fuzzy search
   const results = models
     .map((model) => {
@@ -583,6 +600,9 @@ async function searchAndPrintModels(query: string, forceUpdate: boolean): Promis
     } else if (model.id.startsWith("oai/") || model.isOAIDirect) {
       // OAI direct model - convert oai/model to oai@model
       fullModelId = model.id.replace("oai/", "oai@");
+    } else if (model.source === "LiteLLM" || model.id.startsWith("litellm@")) {
+      // LiteLLM model - already has litellm@ prefix
+      fullModelId = model.id;
     } else {
       // OpenRouter model - add openrouter@ prefix
       fullModelId = `openrouter@${model.id}`;
@@ -642,6 +662,7 @@ async function searchAndPrintModels(query: string, forceUpdate: boolean): Promis
   console.log("OpenAI direct model:  claudish --model oai@<model-name>");
   console.log("Local Ollama model:   claudish --model ollama@<model-name>");
   console.log("OpenCode Zen model:   claudish --model zen@<model-id>");
+  console.log("LiteLLM proxy model:  claudish --model litellm@<model-group>");
 }
 
 /**
@@ -719,6 +740,8 @@ async function printAllModels(jsonOutput: boolean, forceUpdate: boolean): Promis
               id = m.id.replace("ollama/", "ollama@");
             } else if (m.isZen || m.id.startsWith("zen/")) {
               id = m.id.replace("zen/", "zen@");
+            } else if (m.source === "LiteLLM" || m.id.startsWith("litellm@")) {
+              id = m.id;
             } else {
               id = `openrouter@${m.id}`;
             }
@@ -821,6 +844,41 @@ async function printAllModels(jsonOutput: boolean, forceUpdate: boolean): Promis
     console.log("  Use: claudish --model zen@<model-id>");
   }
 
+  // Print LiteLLM models if configured
+  if (process.env.LITELLM_BASE_URL && process.env.LITELLM_API_KEY) {
+    try {
+      const litellmModels = await fetchLiteLLMModels(
+        process.env.LITELLM_BASE_URL,
+        process.env.LITELLM_API_KEY,
+        forceUpdate
+      );
+      if (litellmModels.length > 0) {
+        console.log(
+          `\n🔗 LITELLM PROXY (${litellmModels.length} model groups):\n`
+        );
+        console.log("    Model                          Context    Pricing      Tools");
+        console.log("  " + "─".repeat(68));
+
+        for (const model of litellmModels) {
+          const modelId = model.id.length > 30 ? model.id.substring(0, 27) + "..." : model.id;
+          const modelIdPadded = modelId.padEnd(32);
+          const contextPadded = (model.context || "N/A").padEnd(10);
+          const pricingStr = model.isFree
+            ? `${GREEN}FREE${RESET}`
+            : (model.pricing?.average || "N/A");
+          const pricingPadded = model.isFree ? "FREE        " : pricingStr.padEnd(12);
+          const tools = model.supportsTools ? `${GREEN}✓${RESET}` : `${RED}✗${RESET}`;
+
+          console.log(`    ${modelIdPadded} ${contextPadded} ${pricingPadded} ${tools}`);
+        }
+        console.log("");
+        console.log("  Use: claudish --model litellm@<model-group>");
+      }
+    } catch {
+      // Ignore fetch errors
+    }
+  }
+
   // Group by provider
   const byProvider = new Map<string, any[]>();
   for (const model of models) {
@@ -877,6 +935,7 @@ async function printAllModels(jsonOutput: boolean, forceUpdate: boolean): Promis
   );
   console.log("Local Ollama model:    claudish --model ollama@<model-name>");
   console.log("OpenCode Zen model:    claudish --model zen@<model-id>");
+  console.log("LiteLLM proxy model:   claudish --model litellm@<model-group>");
   console.log("Search:                claudish --search <query>");
   console.log("Top models:            claudish --top-models");
 }
