@@ -29,6 +29,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { resolveProvider, parseUrlModel } from "./provider-registry.js";
 import { resolveRemoteProvider } from "./remote-provider-registry.js";
+import { autoRoute, getAutoRouteHint } from "./auto-route.js";
 import {
   parseModelSpec,
   isLocalProviderName,
@@ -75,6 +76,10 @@ export interface ProviderResolution {
   deprecationWarning?: string;
   /** Parsed model specification */
   parsed?: ParsedModel;
+  /** Whether this resolution came from auto-routing (isExplicitProvider was false) */
+  wasAutoRouted?: boolean;
+  /** Human-readable auto-routing decision message */
+  autoRouteMessage?: string;
 }
 
 /**
@@ -263,9 +268,11 @@ function isApiKeyAvailable(info: ApiKeyInfo): boolean {
  * Resolution order:
  * 1. Parse model spec using new unified parser
  * 2. Check for local providers (no API key needed)
- * 3. Check for explicit provider routing
- * 4. Try native provider detection for models without explicit provider
- * 5. Fall back chain: provider API -> OpenRouter -> Vertex
+ * 3. Check for native Anthropic models
+ * 4. Check for explicit OpenRouter routing
+ * 5. Auto-routing priority chain (LiteLLM -> OAuth -> API key -> OpenRouter fallback)
+ * 6. Try to resolve as direct API provider
+ * 7. Unknown provider fallback
  *
  * @param modelId - The model ID to resolve (can be undefined for default behavior)
  * @returns Complete provider resolution including API key requirements
@@ -372,7 +379,50 @@ export function resolveModelProvider(modelId: string | undefined): ProviderResol
     });
   }
 
-  // 5. Try to resolve as direct API provider
+  // 5. Auto-routing: when no explicit provider was given, use priority chain
+  let pendingAutoRouteMessage: string | undefined;
+  if (!parsed.isExplicitProvider && parsed.provider !== "native-anthropic") {
+    const autoResult = autoRoute(parsed.model, parsed.provider);
+
+    if (autoResult) {
+      if (autoResult.provider === "litellm") {
+        const info = API_KEY_INFO.litellm;
+        return addCommonFields({
+          category: "direct-api",
+          providerName: "LiteLLM",
+          modelName: autoResult.modelName,
+          fullModelId: autoResult.resolvedModelId,
+          requiredApiKeyEnvVar: info.envVar || null,
+          apiKeyAvailable: isApiKeyAvailable(info),
+          apiKeyDescription: info.description,
+          apiKeyUrl: info.url,
+          wasAutoRouted: true,
+          autoRouteMessage: autoResult.displayMessage,
+        });
+      }
+
+      if (autoResult.provider === "openrouter") {
+        const info = API_KEY_INFO.openrouter;
+        return addCommonFields({
+          category: "openrouter",
+          providerName: "OpenRouter",
+          modelName: autoResult.modelName,
+          fullModelId: autoResult.resolvedModelId,
+          requiredApiKeyEnvVar: info.envVar,
+          apiKeyAvailable: isApiKeyAvailable(info),
+          apiKeyDescription: info.description,
+          apiKeyUrl: info.url,
+          wasAutoRouted: true,
+          autoRouteMessage: autoResult.displayMessage,
+        });
+      }
+
+      // For oauth/api-key routes: fall through to resolveRemoteProvider() with annotation
+      pendingAutoRouteMessage = autoResult.displayMessage;
+    }
+  }
+
+  // 6. Try to resolve as direct API provider
   const remoteResolved = resolveRemoteProvider(modelId);
   if (remoteResolved) {
     const provider = remoteResolved.provider;
@@ -388,6 +438,8 @@ export function resolveModelProvider(modelId: string | undefined): ProviderResol
       PROVIDER_DISPLAY_NAMES[provider.name] ||
       provider.name.charAt(0).toUpperCase() + provider.name.slice(1);
 
+    const wasAutoRouted = !parsed.isExplicitProvider;
+
     // Return direct-api resolution — report missing key instead of silent fallback
     return addCommonFields({
       category: "direct-api",
@@ -398,10 +450,14 @@ export function resolveModelProvider(modelId: string | undefined): ProviderResol
       apiKeyAvailable: isApiKeyAvailable(info),
       apiKeyDescription: info.envVar ? info.description : null,
       apiKeyUrl: info.envVar ? info.url : null,
+      wasAutoRouted,
+      autoRouteMessage: wasAutoRouted
+        ? (pendingAutoRouteMessage ?? `Auto-routed: ${parsed.model} -> ${providerDisplayName}`)
+        : undefined,
     });
   }
 
-  // 6. Handle unknown providers (vendor/model format without known provider)
+  // 7. Handle unknown providers (vendor/model format without known provider)
   // Require explicit provider specification: openrouter@vendor/model
   if (parsed.provider === "unknown") {
     return addCommonFields({
@@ -416,7 +472,7 @@ export function resolveModelProvider(modelId: string | undefined): ProviderResol
     });
   }
 
-  // 7. Fallback for any remaining cases (shouldn't normally reach here)
+  // 8. Fallback for any remaining cases (shouldn't normally reach here)
   return addCommonFields({
     category: "unknown",
     providerName: "Unknown",
@@ -497,6 +553,25 @@ export function getMissingKeyError(resolution: ProviderResolution): string {
   if (resolution.apiKeyUrl) {
     lines.push("");
     lines.push(`Get your API key from: ${resolution.apiKeyUrl}`);
+  }
+
+  // Auto-route hint: show actionable options when no credentials were found
+  // and the model was not explicitly prefixed by the user (auto-detected provider).
+  // This helps users understand how to authenticate when auto-routing found no route.
+  {
+    const parsed = resolution.parsed;
+    if (
+      parsed &&
+      !parsed.isExplicitProvider &&
+      parsed.provider !== "unknown" &&
+      parsed.provider !== "native-anthropic"
+    ) {
+      const hint = getAutoRouteHint(parsed.model, parsed.provider);
+      if (hint) {
+        lines.push("");
+        lines.push(hint);
+      }
+    }
   }
 
   // Helpful tips based on category

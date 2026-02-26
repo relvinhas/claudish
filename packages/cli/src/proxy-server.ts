@@ -38,6 +38,7 @@ import {
 import { getVertexConfig, validateVertexOAuthConfig } from "./auth/vertex-auth.js";
 import { resolveModelProvider } from "./providers/provider-resolver.js";
 import { warmPricingCache } from "./services/pricing-cache.js";
+import { fetchLiteLLMModels } from "./model-loader.js";
 
 export interface ProxyServerOptions {
   summarizeTools?: boolean; // Summarize tool descriptions for local models
@@ -164,15 +165,29 @@ export async function createProxyServer(
     // Use centralized resolver with fallback logic
     const resolution = resolveModelProvider(targetModel);
 
-    // If resolver says use OpenRouter (including fallback cases), return null
-    // to let the OpenRouter handler take over
+    if (resolution.wasAutoRouted && resolution.autoRouteMessage) {
+      console.error(`[Auto-route] ${resolution.autoRouteMessage}`);
+    }
+
+    // If resolver says use OpenRouter (including fallback cases), create the handler
+    // directly here so we can use the correctly-formatted fullModelId (e.g. "google/gemini-2.0-flash")
+    // rather than the raw targetModel string.
     if (resolution.category === "openrouter") {
+      if (resolution.wasAutoRouted && resolution.fullModelId) {
+        return getOpenRouterHandler(resolution.fullModelId);
+      }
       return null;
     }
 
+    // When auto-routed (e.g. to LiteLLM), use the resolved fullModelId so that
+    // resolveRemoteProvider() receives "litellm@gemini-2.0-flash" instead of the
+    // original bare model name which would match the wrong (native) provider.
+    const resolveTarget =
+      resolution.wasAutoRouted && resolution.fullModelId ? resolution.fullModelId : targetModel;
+
     // If resolver says use direct-api and key is available, create handler
     if (resolution.category === "direct-api" && resolution.apiKeyAvailable) {
-      const resolved = resolveRemoteProvider(targetModel);
+      const resolved = resolveRemoteProvider(resolveTarget);
       if (!resolved) return null;
 
       // Skip 'openrouter' provider here - it uses the existing OpenRouterHandler
@@ -333,7 +348,12 @@ export async function createProxyServer(
         return null; // Unknown provider
       }
 
-      remoteProviderHandlers.set(targetModel, handler);
+      // Cache under both the original targetModel and the resolveTarget (if different)
+      // so subsequent lookups with either key are served from cache.
+      remoteProviderHandlers.set(resolveTarget, handler);
+      if (resolveTarget !== targetModel) {
+        remoteProviderHandlers.set(targetModel, handler);
+      }
       return handler;
     }
 
@@ -342,7 +362,17 @@ export async function createProxyServer(
     return null;
   };
 
-  // Handlers are created lazily on first request - no pre-warming needed
+  // Pre-warm LiteLLM model cache for auto-routing (non-blocking)
+  if (process.env.LITELLM_BASE_URL && process.env.LITELLM_API_KEY) {
+    fetchLiteLLMModels(
+      process.env.LITELLM_BASE_URL,
+      process.env.LITELLM_API_KEY
+    ).then(() => {
+      log("[Proxy] LiteLLM model cache pre-warmed for auto-routing");
+    }).catch(() => {
+      // Silently ignore - auto-routing will skip LiteLLM if cache unavailable
+    });
+  }
 
   const getHandlerForRequest = (requestedModel: string): ModelHandler => {
     // 1. Monitor Mode Override
